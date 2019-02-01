@@ -29,21 +29,6 @@ sub vcl_recv {
         return (synth(200, "OK"));
     }
 
-    if (req.method == "PURGE") {
-        if(!client.ip ~ purge) {
-            return (synth(405, "Not allowed."));
-        }
-        return (purge);
-    }
-
-    if (req.method == "BAN") {
-        if (!client.ip ~ purge) {
-            return(synth(405, "Not allowed."));
-        }
-        ban("req.url ~ "+req.url+" && req.http.host == "+req.http.host);
-        return(synth(200, "Ban added"));
-    }
-
     # Remove the "has_js" cookie
     set req.http.Cookie = regsuball(req.http.Cookie, "has_js=[^;]+(; )?", "");
 
