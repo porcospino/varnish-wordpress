@@ -1,219 +1,198 @@
 vcl 4.0;
 
-# Varnish 5 configuration for wordpress
+# Varnish 6 configuration for wordpress
 # AdminGeekZ Ltd <sales@admingeekz.com>
 # URL: www.admingeekz.com/varnish-wordpress
-# Version: 1.7
+# Version: 1.7 and then some
+## updated -> Chris Fryer <c.j.fryer@lse.ac.uk>
 
-#Configure the backend webserver
-backend default {
-    .host = "127.0.0.1";
-    .port = "80";
-    .probe = {
-        .url = "/";
-	.interval = 5s;
-	.timeout = 30s;
-        .window = 5;
-        .threshold = 3;
-    }
+backend dummy {
+    # Not used
+    .host = "localhost";
 }
 
-# Have separate backend for wp-admin for longer timesouts
-backend wpadmin {
-  .host = "127.0.0.1";
-  .port = "80";
-  .first_byte_timeout = 500000s;
-  .between_bytes_timeout = 500000s;
-    .probe = {
-        .url = "/";
-	.interval = 5s;
-	.timeout = 15m;
-        .window = 5;
-        .threshold = 3;
-    }
-}
-
-#Which hosts are allowed to PURGE the cache
-acl purge {
-  "127.0.0.1";
-}
-
-import directors;
+import std;
+import goto;
 
 sub vcl_init {
-    new cluster1 = directors.round_robin();
-    cluster1.add_backend(default);
-    new cluster2 = directors.round_robin();
-    cluster2.add_backend(wpadmin);
+    new elastic_loadbalancer = goto.dns_director("{{ALB_HOSTNAME}}");
+}
+
+sub vcl_backend_fetch {
+  set bereq.backend = elastic_loadbalancer.backend();
 }
 
 sub vcl_recv {
-	set client.identity = req.http.cookie;
-	set req.backend_hint = cluster1.backend();
 
-	# Purge cache 
-        if (req.method == "BAN") {
-                if (!client.ip ~ purge) {
-                        return(synth(403, "Not allowed."));
-                }
-		ban("req.url ~ "+req.url+" && req.http.host == "+req.http.host);
-		return(synth(200, "Ban added"));
+    # Health Checking
+    if (req.url == "/varnishcheck") {
+        return (synth(200, "OK"));
+    }
+
+    if (req.method == "PURGE") {
+        if(!client.ip ~ purge) {
+            return (synth(405, "Not allowed."));
         }
+        return (purge);
+    }
 
-	# Set X-Forwarded-For header.  You might want to check client.ip against ACL aswell.
-	if (req.http.x-forwarded-for) {
-                set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
+    if (req.method == "BAN") {
+        if (!client.ip ~ purge) {
+            return(synth(405, "Not allowed."));
         }
-	else {
-		set req.http.X-Forwarded-For = client.ip;
-        }
+        ban("req.url ~ "+req.url+" && req.http.host == "+req.http.host);
+        return(synth(200, "Ban added"));
+    }
 
-	# Set forwarded port if HTTPS,  override this if using another port
-	if (req.http.X-Forwarded-Proto == "https" ) {
-		set req.http.X-Forwarded-Port = "443";
-	}
+    # Remove the "has_js" cookie
+    set req.http.Cookie = regsuball(req.http.Cookie, "has_js=[^;]+(; )?", "");
 
+    # Remove any Google Analytics based cookies
+    set req.http.Cookie = regsuball(req.http.Cookie, "__utm.=[^;]+(; )?", "");
 
-	# Remove the "has_js" cookie
-	set req.http.Cookie = regsuball(req.http.Cookie, "has_js=[^;]+(; )?", "");
+    # Are there cookies left with only spaces or that are empty?
+    if (req.http.cookie ~ "^ *$") {
+        unset req.http.cookie;
+    }
 
-	# Remove any Google Analytics based cookies
-	set req.http.Cookie = regsuball(req.http.Cookie, "__utm.=[^;]+(; )?", "");
+    if (req.method != "GET" && req.method != "HEAD") {
+        /* We only deal with GET and HEAD by default */
+        return (pass);
+    }
 
-	# Are there cookies left with only spaces or that are empty?
-	if (req.http.cookie ~ "^ *$") {
-		unset req.http.cookie;
-	}
+    # Don't cache admin or login pages
+    if (req.url ~ "wp-(login|admin)" ||
+        req.url ~ "preview=true" ||
+        req.url ~ "contact-form") {
+        return (pass);
+    }
 
-	if (req.method != "GET" && req.method != "HEAD") {
-		/* We only deal with GET and HEAD by default */
-		return (pass);
-	}
+    # Don't cache logged in users
+    if (req.http.Cookie && req.http.Cookie ~ "(wordpress_|wordpress_logged_in|comment_author_)") {
+        return(pass);
+    }
 
+    # Don't cache ajax requests, urls with ?nocache or comments/login/regiser
+    if ((req.http.X-Requested-With == "XMLHttpRequest" && req.method != "GET") || 
+        req.url ~ "nocache" || req.url ~ "(control.php|wp-comments-post.php|wp-login.php|register.php)") {
+        return (pass);
+    }
 
-	#Don't cache admin or login pages
-	if (req.url ~ "wp-(login|admin)" || req.url ~ "preview=true") {
-		return (pass);
-	}
+    # Don't cache requests for /simplesaml
+    if (req.url ~ "^/simplesaml") {
+        return (pass);
+    }
 
-	#Don't cache logged in users
-	if (req.http.Cookie && req.http.Cookie ~ "(wordpress_|wordpress_logged_in|comment_author_)") {
-		return(pass);
-	}
+    # Normalize the url - first remove any hashtags (shouldn't make it to the server anyway, but just in case)
+    if (req.url ~ "\#") {
+        set req.url=regsub(req.url,"\#.*$","");
+    }
+    # Normalize the url - remove Google tracking urls
+    if (req.url ~ "\?") {
+        set req.url=regsuball(req.url,"&(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid)=([A-z0-9_\-]+)","");
+        set req.url=regsuball(req.url,"\?(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid)=([A-z0-9_\-]+)","?");
+        set req.url=regsub(req.url,"\?&","?");
+        set req.url=regsub(req.url,"\?$","");
+    }
 
-	#Don't cache ajax requests, urls with ?nocache or comments/login/regiser
-	if(req.http.X-Requested-With == "XMLHttpRequest" || req.url ~ "nocache" || req.url ~ "(control.php|wp-comments-post.php|wp-login.php|register.php)") {
-		return (pass);
-	}
-
-	if (req.http.Authorization) {
-		# Not cacheable by default
-	  return (pass);
-	}
-
-	#Set backend to wpadmin backend for longer timeouts
-	if (req.url ~ "/wp-admin") {
-		set req.backend_hint = cluster2.backend();
-	}
-
-
-	#Remove all cookies if none of the above match
-	unset req.http.Max-Age;
-	unset req.http.Pragma;
-	unset req.http.Cookie;
-	return (hash);
+    # Remove all cookies if none of the above match
+    unset req.http.Max-Age;
+    unset req.http.Pragma;
+    unset req.http.Cookie;
+    return (hash);
 }
 
-sub vcl_pipe {
-	return (pipe);
-}
- 
-sub vcl_pass {
-	return (fetch);
-}
-
-# The data on which the hashing will take place
-sub vcl_hash {
-	hash_data(req.url);
-	if (req.http.host) {
-		hash_data(req.http.host);
-	}
-	else {
-		hash_data(server.ip);
-	}
-
-	# If the client supports compression, keep that in a different cache
-	if (req.http.Accept-Encoding) {
-		hash_data(req.http.Accept-Encoding);
-	}
-
-	#HTTPS Support
-	if  (req.http.X-Forwarded-Port) {
-		hash_data(req.http.X-Forwarded-Port);
-	}
-	#Set the hash to include the cookie if it exists, to maintain per user cache
-	if (req.http.Cookie ~"(wp-postpass|wordpress_logged_in|comment_author_)") {
-		hash_data(req.http.Cookie);
-	}
-        return (lookup);
-}
-
-
-# This function is used when a request is sent by our backend
 sub vcl_backend_response {
-	set beresp.ttl = 0s;
-	set beresp.grace = 1m;
 
-	if ( beresp.status >= 400 ) {
-		set beresp.ttl = 0s;
-		set beresp.grace = 0s;
-		return (deliver);
-	}
+    unset beresp.http.server;
+    unset beresp.http.x-powered-by;
+    unset beresp.http.pragma;
 
-	if (bereq.url ~ "wp-(login|admin)" || bereq.url ~ "preview=true") {
-		set beresp.uncacheable = true;
-		set beresp.ttl = 120s;
-	}
+    # Uncomment this if you're happy to give away the structure of your VPC
+    # set beresp.http.X-Backend = beresp.backend.name;
 
-	if (bereq.http.Cookie ~"(wp-postpass|wordpress_logged_in|comment_author_)") {
-		set beresp.uncacheable = true;
-	        set beresp.ttl = 120s;
-	}
+    # Don't cache error pages
+    if (beresp.status >= 400) {
+        set beresp.ttl = 0m;
+        return(deliver);
+    }
 
-	#Set the default cache time of 1 hour
-	set beresp.ttl = 1h;
-	return (deliver);
+    if (bereq.url ~ "wp-(login|admin)" ||
+        bereq.url ~ "preview=true" ||
+        bereq.url ~ "contact-form" ||
+        bereq.url ~ "^/simplesaml") {
+        set beresp.uncacheable = true;
+        set beresp.ttl = 120s;
+        return (deliver);
+    }
+
+    if (bereq.http.Cookie ~"(wp-postpass|wordpress_logged_in|comment_author_)") {
+        set beresp.uncacheable = true;
+        set beresp.ttl = 120s;
+        return (deliver);
+    }
+
+    # We have delivered all the cookies we need, so...
+    unset beresp.http.Set-Cookie;
+
+    if (bereq.http.X-Requested-With == "XMLHttpRequest" && bereq.url ~ "liveblog") {
+        set beresp.ttl = 10s;
+        set beresp.http.Cache-Control = "public";
+        unset beresp.http.Expires;
+        return (deliver);
+    }
+
+    if (bereq.url ~ "/files/"                    ||
+        bereq.url ~ "/uploads/"                  ||
+        bereq.url ~ "/blogs.dir/"                ||
+        beresp.http.Content-Type ~ "image"       ||
+        beresp.http.Content-Type ~ "javascript"  ||
+        beresp.http.Content-Type ~ "text/css"    ||
+        beresp.http.Content-Type ~ "x-font-woff") {
+
+        set beresp.ttl = 1w;
+        set beresp.http.Cache-Control = "public, stale-while-revalidate=1209600";
+        set beresp.http.Expires = now + 1w;
+
+        set beresp.keep = beresp.ttl + 1w;
+        set beresp.grace = beresp.keep;
+        return (deliver);
+    }
+
+    set beresp.ttl   = 2m;
+    set beresp.grace = 1h;
+
+    set beresp.http.Cache-Control = "public, stale-while-revalidate=3600, stale-if-error=3600";
+    set beresp.http.Expires = now + 2m;
+
+    return (deliver);
 }
 
-
-
-# The routine when we deliver the HTTP request to the user
-# Last chance to modify headers that are sent to the client
 sub vcl_deliver {
 
-	if (obj.hits > 0) { 
-		set resp.http.X-Cache = "cached";
-	} else {
-		set resp.http.x-Cache = "uncached";
-	}
+    # Uncomment this if you're happy to give away the structure of your VPC
+    # set resp.http.X-Cache-Server = server.identity;
 
-	# Remove some headers: PHP version
-	unset resp.http.X-Powered-By;
+    # Uncomment this if you want to see hits and misses
+    # if (obj.hits > 0) {
+    #     set resp.http.X-Hits  = obj.hits;
+    #     set resp.http.X-Cache = "HIT";
+    # } else {
+    #     set resp.http.X-Cache = "MISS";
+    # }
 
-	# Remove some headers: Apache version & OS
-	unset resp.http.Server;
-
-	# Remove some heanders: Varnish
-	unset resp.http.Via;
-	unset resp.http.X-Varnish;
-
-	return (deliver);
+    # Warn downstream caches that the response is stale
+    if (obj.ttl < 0s && resp.status == 200) {
+       set resp.http.Warning = "110 Response is stale";
+    }
 }
 
-sub vcl_init {
-	return (ok);
-}
- 
-sub vcl_fini {
-	return (ok);
+sub vcl_hit {
+    if (obj.ttl >= 0s) {
+        return (deliver);
+    }
+    if (!std.healthy(req.backend_hint) && (obj.ttl + obj.grace > 0s)) {
+        return (deliver);
+    }
+    return (miss);
 }
