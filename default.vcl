@@ -80,6 +80,10 @@ sub vcl_recv {
         set req.url=regsub(req.url,"\?$","");
     }
 
+    # Deal with Wordpress Network requests for static assets
+    set req.url  = regsub(req.url, "^/[^/]+/wp-content/(.*)",  "/wp-content/\1");
+    set req.url  = regsub(req.url, "^/[^/]+/wp-includes/(.*)", "/wp-includes/\1");
+
     # Remove all cookies if none of the above match
     unset req.http.Max-Age;
     unset req.http.Pragma;
