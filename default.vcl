@@ -6,21 +6,19 @@ vcl 4.0;
 # Version: 1.7 and then some
 ## updated -> Chris Fryer <c.j.fryer@lse.ac.uk>
 
-backend dummy {
-    # Not used
-    .host = "localhost";
+backend default {
+    .host = "{{NLB_HOSTNAME}}";
+    .port = "80";
+    .probe {
+        .url = "/wp-admin/install.php",
+        .timeout = 1s;
+        .interval = 5s;
+        .window = 5;
+        .threshold = 3;
+    }
 }
 
 import std;
-import goto;
-
-sub vcl_init {
-    new elastic_loadbalancer = goto.dns_director("{{ALB_HOSTNAME}}");
-}
-
-sub vcl_backend_fetch {
-  set bereq.backend = elastic_loadbalancer.backend();
-}
 
 sub vcl_recv {
 
