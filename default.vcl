@@ -10,7 +10,7 @@ backend default {
     .host = "{{NLB_HOSTNAME}}";
     .port = "80";
     .probe {
-        .url = "/wp-admin/install.php",
+        .url = "/wp-admin/install.php";
         .timeout = 1s;
         .interval = 5s;
         .window = 5;
