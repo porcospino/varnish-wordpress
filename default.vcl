@@ -7,9 +7,9 @@ vcl 4.0;
 ## updated -> Chris Fryer <c.j.fryer@lse.ac.uk>
 
 backend default {
-    .host = "{{NLB_HOSTNAME}}";
+    .host = "127.0.0.1";
     .port = "80";
-    .probe {
+    .probe = {
         .url = "/wp-admin/install.php";
         .timeout = 1s;
         .interval = 5s;
