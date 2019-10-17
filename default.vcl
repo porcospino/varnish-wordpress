@@ -70,10 +70,10 @@ sub vcl_recv {
     if (req.url ~ "\#") {
         set req.url=regsub(req.url,"\#.*$","");
     }
-    # Normalize the url - remove Google tracking urls
+    # Normalize the url - remove Google and Facebook tracking urls
     if (req.url ~ "\?") {
-        set req.url=regsuball(req.url,"&(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid)=([A-z0-9_\-]+)","");
-        set req.url=regsuball(req.url,"\?(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid)=([A-z0-9_\-]+)","?");
+        set req.url=regsuball(req.url,"&(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid|fbclid)=([A-z0-9_\-]+)","");
+        set req.url=regsuball(req.url,"\?(utm_source|utm_medium|utm_campaign|utm_content|utm_term|gclid|fbclid)=([A-z0-9_\-]+)","?");
         set req.url=regsub(req.url,"\?&","?");
         set req.url=regsub(req.url,"\?$","");
     }
